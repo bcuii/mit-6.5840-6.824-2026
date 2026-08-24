@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MapReduce 三方通信</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper:      #ECEEF1;
+    --surface:    #FFFFFF;
+    --ink:        #0F1419;
+    --ink-soft:   #5A6472;
+    --ink-faint:  #939BA6;
+    --rule:       #CBD2DA;
+    --control:    #2F5D8C;
+    --data:       #C2540A;
+    --data-tint:  #FBF0E7;
+    --beat:       #8A93A0;
+    --display: "Space Grotesk", "Noto Sans SC", sans-serif;
+    --body:    "IBM Plex Sans", "Noto Sans SC", sans-serif;
+    --mono:    "IBM Plex Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 56px 32px 80px;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1160px; margin: 0 auto; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(30px, 4.2vw, 46px);
+    letter-spacing: -0.02em;
+    line-height: 1.12;
+    margin: 0 0 18px;
+  }
+
+  .thesis {
+    font-size: 17px;
+    color: var(--ink-soft);
+    max-width: 62ch;
+    margin: 0 0 44px;
+    padding-left: 18px;
+    border-left: 3px solid var(--data);
+  }
+  .thesis b { color: var(--ink); font-weight: 600; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 28px;
+    padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    margin-bottom: 28px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+  .legend span { display: flex; align-items: center; gap: 10px; }
+  .swatch { width: 34px; height: 0; flex: none; }
+  .sw-control { border-top: 2px solid var(--control); }
+  .sw-data    { border-top: 7px solid var(--data); }
+  .sw-beat    { border-top: 2px dashed var(--beat); }
+  .sw-gasp    { border-top: 2px dotted var(--control); }
+
+  .canvas {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    padding: 8px 0;
+    overflow-x: auto;
+  }
+  .canvas svg { display: block; min-width: 940px; width: 100%; height: auto; }
+
+  text { font-family: var(--body); }
+  .col-name  { font-family: var(--display); font-size: 19px; font-weight: 700; fill: var(--ink); }
+  .col-note  { font-size: 12.5px; fill: var(--ink-soft); }
+  .col-tag   { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; fill: var(--ink-faint); }
+  .msg-title { font-size: 14.5px; font-weight: 600; fill: var(--ink); }
+  .msg-sub   { font-size: 12.5px; fill: var(--ink-soft); }
+  .msg-mono  { font-family: var(--mono); font-size: 12px; fill: var(--ink-soft); }
+  .data-title{ font-size: 15.5px; font-weight: 600; fill: var(--data); }
+  .data-sub  { font-size: 12.5px; fill: #96460D; }
+  .beat-txt  { font-size: 12.5px; fill: var(--beat); }
+  .seq       { font-family: var(--mono); font-size: 11px; fill: var(--ink-faint); }
+
+  .lifeline { stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 6; }
+  .flow     { stroke: var(--control); stroke-width: 1.6; fill: none; }
+  .beat     { stroke: var(--beat); stroke-width: 1.4; stroke-dasharray: 5 5; fill: none; }
+  .gasp     { stroke: var(--control); stroke-width: 1.6; stroke-dasharray: 1.5 4; stroke-linecap: round; fill: none; }
+  .pipe     { stroke: var(--data); stroke-width: 7; fill: none; stroke-linecap: butt; }
+  .pipe-run { stroke: #F5C9A6; stroke-width: 3; stroke-dasharray: 10 12; fill: none; }
+  @media (prefers-reduced-motion: no-preference) {
+    .pipe-run { animation: march 1.1s linear infinite; }
+  }
+  @keyframes march { to { stroke-dashoffset: -44; } }
+
+  .scale {
+    margin-top: 40px;
+    padding: 26px 28px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+  }
+  .scale h2 {
+    font-family: var(--display);
+    font-size: 17px;
+    font-weight: 700;
+    margin: 0 0 4px;
+  }
+  .scale p { margin: 0 0 22px; color: var(--ink-soft); font-size: 14px; max-width: 70ch; }
+  .bar-row { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+  .bar-key {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    width: 168px;
+    flex: none;
+    text-align: right;
+  }
+  .bar-track { flex: 1; height: 22px; background: #E4E8ED; position: relative; }
+  .bar-fill { display: block; height: 100%; }
+  .bar-data { width: 100%; background: var(--data); }
+  .bar-meta { width: 0.006%; min-width: 2px; background: var(--control); }
+  .bar-val {
+    font-family: var(--mono);
+    font-size: 12px;
+    width: 96px;
+    flex: none;
+    color: var(--ink);
+  }
+  .scale-note {
+    margin: 18px 0 0;
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+  }
+  .scale-note b { color: var(--ink); font-weight: 600; }
+
+  footer {
+    margin-top: 36px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    letter-spacing: .04em;
+  }
+
+  @media (max-width: 640px) {
+    body { padding: 36px 18px 56px; }
+    .bar-key { width: 100px; text-align: left; }
+    .bar-row { flex-wrap: wrap; }
+  }
+
+  @media print {
+    body { background: #fff; padding: 0; }
+    .canvas, .scale, .legend { border-color: #999; }
+    .pipe-run { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">MapReduce · OSDI 2004 · 读书笔记</p>
+  <h1>master、map worker、reduce worker<br>之间传递了什么</h1>
+  <p class="thesis">
+    <b>master 只传控制信息和元数据，真正的数据只在 worker 之间直接流动。</b>
+    注意 master 在最左侧，那条承载 1TB 的粗线从头到尾没有碰到它——这就是单 master 能服务 1700 台 worker 的原因。
+  </p>
+
+  <div class="legend">
+    <span><i class="swatch sw-control"></i>控制流</span>
+    <span><i class="swatch sw-beat"></i>心跳，贯穿全程</span>
+    <span><i class="swatch sw-gasp"></i>带外信号 · UDP</span>
+    <span><i class="swatch sw-data"></i>数据流，全部 1TB</span>
+    <span>时间轴自上而下</span>
+  </div>
+
+  <div class="canvas">
+  <svg viewBox="0 0 1100 1010" role="img" aria-labelledby="ttl dsc">
+    <title id="ttl">MapReduce 三方通信时序图</title>
+    <desc id="dsc">master 与 map worker、reduce worker 交换任务分配、完成汇报与心跳；reduce worker 直接向 map worker 拉取分区数据，不经过 master。</desc>
+
+    <defs>
+      <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M1 1 L9 5 L1 9" fill="none" stroke="context-stroke" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </marker>
+      <marker id="head-beat" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M1 1 L9 5 L1 9" fill="none" stroke="context-stroke" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </marker>
+      <marker id="head-fat" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4.6" markerHeight="4.6" orient="auto">
+        <path d="M0 0 L10 5 L0 10 Z" fill="context-stroke"/>
+      </marker>
+    </defs>
+
+    <rect x="20" y="24" width="270" height="86" fill="#F4F6F8" stroke="#2F5D8C" stroke-width="1.5"/>
+    <text class="col-tag"  x="40" y="49">COORDINATOR</text>
+    <text class="col-name" x="40" y="74">master</text>
+    <text class="col-note" x="40" y="96">只存元数据 · 状态量 M × R ≈ 60MB</text>
+
+    <rect x="425" y="24" width="270" height="86" fill="#F4F6F8" stroke="#8A93A0" stroke-width="1.5"/>
+    <text class="col-tag"  x="445" y="49">WORKER</text>
+    <text class="col-name" x="445" y="74">map worker</text>
+    <text class="col-note" x="445" y="96">中间结果切成 R 份，写本地磁盘</text>
+
+    <rect x="810" y="24" width="270" height="86" fill="#F4F6F8" stroke="#8A93A0" stroke-width="1.5"/>
+    <text class="col-tag"  x="830" y="49">WORKER</text>
+    <text class="col-name" x="830" y="74">reduce worker</text>
+    <text class="col-note" x="830" y="96">拉取 → 排序 → 输出写 GFS</text>
+
+    <line class="lifeline" x1="155" y1="110" x2="155" y2="972"/>
+    <line class="lifeline" x1="560" y1="110" x2="560" y2="972"/>
+    <line class="lifeline" x1="945" y1="110" x2="945" y2="972"/>
+
+    <text class="seq"       x="163" y="163">01</text>
+    <text class="msg-title" x="196" y="163">分配 map 任务</text>
+    <text class="msg-mono"  x="196" y="183">input split 文件名 + 字节范围</text>
+    <text class="msg-sub"   x="196" y="202">优先选持有该副本的机器，这就是 locality 优化</text>
+    <line class="flow" x1="155" y1="215" x2="552" y2="215" marker-end="url(#head)"/>
+
+    <text class="seq"       x="196" y="272">02</text>
+    <text class="msg-title" x="229" y="272">完成汇报</text>
+    <text class="msg-mono"  x="229" y="292">R 个中间文件在本地盘的位置和大小</text>
+    <text class="msg-sub"   x="229" y="311">master 忽略已完成任务的重复汇报，重执行去重靠这条</text>
+    <line class="flow" x1="560" y1="324" x2="163" y2="324" marker-end="url(#head)"/>
+
+    <text class="seq"       x="163" y="381">03</text>
+    <text class="msg-title" x="196" y="381">分配 reduce 任务 + 中间文件位置</text>
+    <text class="msg-mono"  x="196" y="401">分区号 · 位置增量推送</text>
+    <text class="msg-sub"   x="196" y="420">map 陆续完成就陆续推，所以 shuffle 能与 map 阶段重叠</text>
+    <line class="flow" x1="155" y1="433" x2="937" y2="433" marker-end="url(#head)"/>
+
+    <text class="seq"       x="583" y="490">04</text>
+    <text class="msg-title" x="616" y="490">发 RPC 请求</text>
+    <text class="msg-mono"  x="616" y="510">给我第 k 号分区那一段</text>
+    <text class="msg-sub"   x="616" y="529">位置是 master 给的，不是问 map 要的；map 任务此时进程已退出</text>
+    <line class="flow" x1="945" y1="542" x2="568" y2="542" marker-end="url(#head)"/>
+
+    <rect x="560" y="576" width="385" height="76" fill="var(--data-tint)"/>
+    <text class="data-title" x="576" y="601">本分区数据 · 唯一的数据通路</text>
+    <text class="data-sub"   x="576" y="622">15000 × 4000 全连接，每份约 16KB</text>
+    <text class="data-sub"   x="576" y="641">按机器合并后，每次连接取 8~9 段约 140KB</text>
+    <line class="pipe"     x1="560" y1="672" x2="930" y2="672" marker-end="url(#head-fat)"/>
+    <line class="pipe-run" x1="566" y1="672" x2="924" y2="672"/>
+
+    <text class="seq"       x="583" y="729">05</text>
+    <text class="msg-title" x="616" y="729">完成汇报</text>
+    <text class="msg-mono"  x="616" y="749">临时文件已原子 rename 成最终输出</text>
+    <line class="flow" x1="945" y1="762" x2="163" y2="762" marker-end="url(#head)"/>
+
+    <text class="seq"       x="196" y="817">06</text>
+    <text class="msg-title" x="229" y="817">坏记录序号 · UDP last gasp</text>
+    <text class="msg-mono"  x="229" y="837">崩溃前把当前记录序号发给 master</text>
+    <text class="msg-sub"   x="229" y="856">用 UDP 是因为进程正在死，来不及 TCP 握手；同一条记录失败两次才跳过</text>
+    <line class="gasp" x1="560" y1="869" x2="163" y2="869" marker-end="url(#head)"/>
+
+    <text class="msg-title" x="196" y="924">心跳 ping / pong，贯穿全程</text>
+    <text class="beat-txt"  x="196" y="944">响应搭车带回计数器值 · 超时则该机已完成的 map 任务全部重跑</text>
+    <line class="beat" x1="155" y1="961" x2="552" y2="961" marker-end="url(#head-beat)" marker-start="url(#head-beat)"/>
+    <line class="beat" x1="568" y1="961" x2="937" y2="961" marker-end="url(#head-beat)" marker-start="url(#head-beat)"/>
+  </svg>
+  </div>
+
+  <div class="scale">
+    <h2>为什么单 master 撑得住</h2>
+    <p>按 1TB 排序作业等比例画出来。控制消息全部加起来，占用不到数据流量的万分之一。</p>
+
+    <div class="bar-row">
+      <span class="bar-key">数据流 · 那条粗线</span>
+      <span class="bar-track"><span class="bar-fill bar-data"></span></span>
+      <span class="bar-val">1 TB</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-key">元数据 · 经过 master</span>
+      <span class="bar-track"><span class="bar-fill bar-meta"></span></span>
+      <span class="bar-val">≈ 60 MB</span>
+    </div>
+
+    <p class="scale-note">
+      master 保存的是每个任务的状态、以及每个已完成 map 任务的 R 个中间文件位置，
+      也就是 <b>O(M × R)</b> 的来源：15000 × 4000 = 6000 万条，每对约 1 字节。
+      数据一个字节都不经过它——<b>元数据集中、数据分散</b>，和 GFS 的 master / chunkserver 是同一套设计哲学。
+    </p>
+  </div>
+
+  <footer>MIT 6.824 · paper-notes/zh/mapreduce.md</footer>
+
+</div>
+</body>
+</html>

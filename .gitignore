@@ -1,2 +1,4 @@
 pkg/
 *-handin.tar.gz
+.DS_Store
+src/mr/mr-tmp-*
