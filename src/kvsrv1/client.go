@@ -1,11 +1,12 @@
 package kvsrv
 
 import (
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
 )
-
 
 type Clerk struct {
 	clnt   *tester.Clnt
@@ -14,7 +15,6 @@ type Clerk struct {
 
 func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 	ck := &Clerk{clnt: clnt, server: server}
-	// You may add code here.
 	return ck
 }
 
@@ -29,8 +29,16 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+	args := rpc.GetArgs{Key: key}
+	for {
+		reply := rpc.GetReply{}
+		if ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply); ok {
+			return reply.Value, reply.Version, reply.Err
+		}
+		// RPC lost or server unreachable: retry. Get has no side
+		// effects, so resending is always safe.
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -51,6 +59,20 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return rpc.ErrNoKey
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	first := true
+	for {
+		reply := rpc.PutReply{}
+		if ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply); ok {
+			if reply.Err == rpc.ErrVersion && !first {
+				// An earlier attempt may have been executed by the
+				// server with its reply lost; we can't tell.
+				return rpc.ErrMaybe
+			}
+			return reply.Err
+		}
+		// RPC lost or server unreachable: resend.
+		first = false
+		time.Sleep(100 * time.Millisecond)
+	}
 }
