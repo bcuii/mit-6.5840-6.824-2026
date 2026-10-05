@@ -9,12 +9,12 @@ package raft
 
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
@@ -108,12 +108,19 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if len(data) < 1 { // bootstrap without any state?
 		return
 	}
 	// Your code here (3C).
@@ -129,6 +136,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		panic("readPersist: failed to decode persisted state")
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
 }
 
 // how many bytes in Raft's persisted log?
@@ -186,6 +206,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		(args.LastLogTerm == rf.lastLogTerm() && args.LastLogIndex >= rf.lastLogIndex())
 	if (rf.votedFor == noVote || rf.votedFor == args.CandidateId) && upToDate {
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		rf.resetElectionTimer()
 		reply.VoteGranted = true
 	}
@@ -237,6 +258,14 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool // true if the follower's log matched PrevLogIndex and PrevLogTerm
+
+	// set when Success is false because of a log mismatch, so the
+	// leader can move nextIndex back past a whole term at once instead
+	// of one entry at a time.
+	LogTooShort   bool // the follower has no entry at PrevLogIndex
+	LastLogIndex  int  // the follower's last log index; set if LogTooShort
+	ConflictTerm  int  // term of the follower's entry at PrevLogIndex; set if !LogTooShort
+	ConflictIndex int  // index of the follower's first entry with ConflictTerm; set if !LogTooShort
 }
 
 // AppendEntries RPC handler.
@@ -257,8 +286,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.resetElectionTimer()
 
 	// reject unless our log has an entry at PrevLogIndex whose term
-	// matches PrevLogTerm.
-	if args.PrevLogIndex > rf.lastLogIndex() || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	// matches PrevLogTerm, and tell the leader where the mismatch is.
+	if args.PrevLogIndex > rf.lastLogIndex() {
+		reply.LogTooShort = true
+		reply.LastLogIndex = rf.lastLogIndex()
+		return
+	}
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		// walk back to our first entry of ConflictTerm. log[0] has term
+		// 0, which no real entry has, so this stops at index 1 at the
+		// latest.
+		reply.ConflictIndex = args.PrevLogIndex
+		for rf.log[reply.ConflictIndex-1].Term == reply.ConflictTerm {
+			reply.ConflictIndex--
+		}
 		return
 	}
 
@@ -269,6 +311,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		index := args.PrevLogIndex + 1 + i
 		if index > rf.lastLogIndex() || rf.log[index].Term != entry.Term {
 			rf.log = append(rf.log[:index], args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -295,6 +338,7 @@ func (rf *Raft) startElection() {
 	rf.state = candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.resetElectionTimer()
 
 	args := &RequestVoteArgs{
@@ -377,9 +421,10 @@ func (rf *Raft) broadcastAppendEntries() {
 
 // sendEntriesTo sends server one AppendEntries carrying the entries
 // from rf.nextIndex[server] onwards. if server rejects it, the reply
-// handler below decrements nextIndex[server] and calls sendEntriesTo
-// again, so the leader keeps retrying from one entry earlier until
-// server accepts. rf.mu must be held.
+// handler below moves nextIndex[server] back (see
+// nextIndexAfterMismatch) and calls sendEntriesTo again, so the leader
+// keeps retrying from earlier entries until server accepts.
+// rf.mu must be held.
 func (rf *Raft) sendEntriesTo(server int) {
 	prevLogIndex := rf.nextIndex[server] - 1
 	args := &AppendEntriesArgs{
@@ -418,16 +463,35 @@ func (rf *Raft) sendEntriesTo(server int) {
 			}
 			return
 		}
-		// the peer's log doesn't match at PrevLogIndex. back up one
-		// entry and send again; that request's reply comes back here,
-		// so this repeats until the peer accepts. if nextIndex has
-		// changed since this request was built, another reply already
-		// moved it and this reply is stale.
-		if prevLogIndex == rf.nextIndex[server]-1 {
-			rf.nextIndex[server]--
+		// the peer's log doesn't match at PrevLogIndex. act on this
+		// reply only if it is not stale:
+		if prevLogIndex == rf.nextIndex[server]-1 && // nextIndex hasn't moved since this request was built
+			prevLogIndex > rf.matchIndex[server] { // the peer isn't already known to match at PrevLogIndex
+			// move nextIndex back and send again. that request's reply
+			// comes back here, so this repeats until the peer accepts.
+			rf.nextIndex[server] = rf.nextIndexAfterMismatch(reply)
 			rf.sendEntriesTo(server)
 		}
 	}()
+}
+
+// nextIndexAfterMismatch returns where to resume sending entries to a
+// follower whose log didn't match at PrevLogIndex, skipping back a
+// whole term at a time. rf.mu must be held.
+func (rf *Raft) nextIndexAfterMismatch(reply *AppendEntriesReply) int {
+	if reply.LogTooShort {
+		return reply.LastLogIndex + 1
+	}
+	// if we also have entries from ConflictTerm, the follower's entries
+	// of that term match ours up to our last one, so resume after it.
+	for i := rf.lastLogIndex(); i > 0; i-- {
+		if rf.log[i].Term == reply.ConflictTerm {
+			return i + 1
+		}
+	}
+	// otherwise none of the follower's ConflictTerm entries are in our
+	// log; resume at the first of them.
+	return reply.ConflictIndex
 }
 
 // advanceCommitIndex commits the highest index replicated on a
@@ -496,6 +560,7 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.state = follower
 	rf.currentTerm = term
 	rf.votedFor = noVote
+	rf.persist()
 }
 
 // resetElectionTimer picks a new randomized election timeout.
@@ -529,6 +594,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 	} else {
 		rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+		rf.persist()
 		index = rf.lastLogIndex()
 		term = rf.currentTerm
 		// replicate now rather than waiting for the next heartbeat.
