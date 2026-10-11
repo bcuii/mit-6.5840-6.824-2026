@@ -71,16 +71,23 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	// start from the last snapshot; raft replays only the entries after it.
+	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
+		sm.Restore(snapshot)
+	}
 	go rsm.reader()
 	return rsm
 }
 
 // reader executes each committed op, and hands the result to the
 // Submit waiting for it (only on the server that submitted the op).
+// It also installs snapshots from raft, and takes one when the log
+// grows past maxraftstate.
 func (rsm *RSM) reader() {
 	for msg := range rsm.applyCh {
-		if !msg.CommandValid {
-			continue // snapshots: 4C
+		if msg.SnapshotValid {
+			rsm.sm.Restore(msg.Snapshot)
+			continue
 		}
 		op := msg.Command.(Op)
 		rep := rsm.sm.DoOp(op.Req)
@@ -90,6 +97,10 @@ func (rsm *RSM) reader() {
 			ch <- rep
 		}
 		rsm.mu.Unlock()
+
+		if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() >= rsm.maxraftstate {
+			rsm.rf.Snapshot(msg.CommandIndex, rsm.sm.Snapshot())
+		}
 	}
 }
 

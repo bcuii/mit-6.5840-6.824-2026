@@ -1,6 +1,9 @@
 package kvraft
 
 import (
+	"bytes"
+	"log"
+
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
@@ -9,9 +12,10 @@ import (
 
 )
 
+// fields are capitalized so that labgob can encode them in snapshots.
 type entry struct {
-	value   string
-	version rpc.Tversion
+	Value   string
+	Version rpc.Tversion
 }
 
 type KVServer struct {
@@ -19,7 +23,8 @@ type KVServer struct {
 	rsm *rsm.RSM
 
 	// Your definitions here.
-	// only rsm's reader goroutine touches data, so no lock is needed.
+	// only rsm's reader goroutine touches data (Restore at startup
+	// runs before the reader starts), so no lock is needed.
 	data map[string]entry
 }
 
@@ -36,28 +41,37 @@ func (kv *KVServer) DoOp(req any) any {
 		if !ok {
 			return rpc.GetReply{Err: rpc.ErrNoKey}
 		}
-		return rpc.GetReply{Value: e.value, Version: e.version, Err: rpc.OK}
+		return rpc.GetReply{Value: e.Value, Version: e.Version, Err: rpc.OK}
 	case rpc.PutArgs:
 		e, ok := kv.data[args.Key] // a missing key has version 0
 		if !ok && args.Version != 0 {
 			return rpc.PutReply{Err: rpc.ErrNoKey}
 		}
-		if args.Version != e.version {
+		if args.Version != e.Version {
 			return rpc.PutReply{Err: rpc.ErrVersion}
 		}
-		kv.data[args.Key] = entry{value: args.Value, version: e.version + 1}
+		kv.data[args.Key] = entry{Value: args.Value, Version: e.Version + 1}
 		return rpc.PutReply{Err: rpc.OK}
 	}
 	return nil
 }
 
+// The snapshot is just the key/value map: versions already make a
+// retried Put harmless, so there is no duplicate-detection state.
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	labgob.NewEncoder(w).Encode(kv.data)
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	var m map[string]entry
+	if err := labgob.NewDecoder(bytes.NewBuffer(data)).Decode(&m); err != nil {
+		log.Fatalf("%v: Restore: %v", kv.me, err)
+	}
+	kv.data = m
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
