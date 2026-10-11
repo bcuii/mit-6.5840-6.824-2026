@@ -1,7 +1,9 @@
 package rsm
 
 import (
+	"math/rand"
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
@@ -15,6 +17,8 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Id  int64 // random, so the reader can find the Submit waiting for it
+	Req any
 }
 
 
@@ -38,6 +42,7 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
+	waiters map[int64]chan any // Op.Id -> Submit waiting for its result
 }
 
 // servers[] contains the ports of the set of
@@ -61,11 +66,42 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		waiters:      make(map[int64]chan any),
 	}
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	// start from the last snapshot; raft replays only the entries after it.
+	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
+		sm.Restore(snapshot)
+	}
+	go rsm.reader()
 	return rsm
+}
+
+// reader executes each committed op, and hands the result to the
+// Submit waiting for it (only on the server that submitted the op).
+// It also installs snapshots from raft, and takes one when the log
+// grows past maxraftstate.
+func (rsm *RSM) reader() {
+	for msg := range rsm.applyCh {
+		if msg.SnapshotValid {
+			rsm.sm.Restore(msg.Snapshot)
+			continue
+		}
+		op := msg.Command.(Op)
+		rep := rsm.sm.DoOp(op.Req)
+
+		rsm.mu.Lock()
+		if ch, ok := rsm.waiters[op.Id]; ok {
+			ch <- rep
+		}
+		rsm.mu.Unlock()
+
+		if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() >= rsm.maxraftstate {
+			rsm.rf.Snapshot(msg.CommandIndex, rsm.sm.Snapshot())
+		}
+	}
 }
 
 func (rsm *RSM) Raft() raftapi.Raft {
@@ -82,6 +118,29 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
 	// is the argument to Submit and id is a unique id for the op.
 
-	// your code here
+	op := Op{Id: rand.Int63(), Req: req}
+	ch := make(chan any, 1) // buffered, so reader never blocks
+
+	rsm.mu.Lock()
+	rsm.waiters[op.Id] = ch
+	rsm.mu.Unlock()
+	defer func() {
+		rsm.mu.Lock()
+		delete(rsm.waiters, op.Id)
+		rsm.mu.Unlock()
+	}()
+
+	_, term, isLeader := rsm.rf.Start(op)
+	for isLeader {
+		select {
+		case rep := <-ch:
+			return rpc.OK, rep
+		case <-time.After(100 * time.Millisecond):
+			// a leader only steps down when its term changes; then
+			// our op may have been overwritten and never execute.
+			curTerm, _ := rsm.rf.GetState()
+			isLeader = curTerm == term
+		}
+	}
 	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
 }

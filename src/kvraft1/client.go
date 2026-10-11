@@ -1,6 +1,8 @@
 package kvraft
 
 import (
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
@@ -37,7 +39,15 @@ func (ck *Clerk) Leader() int {
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
 	// You will have to modify this function.
-	return "", 0, ""
+	args := rpc.GetArgs{Key: key}
+	for {
+		reply := rpc.GetReply{}
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Get", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			return reply.Value, reply.Version, reply.Err
+		}
+		ck.tryNextServer()
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -59,5 +69,27 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	first := true
+	for {
+		reply := rpc.PutReply{}
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Put", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			if reply.Err == rpc.ErrVersion && !first {
+				// an earlier attempt may have been executed with its
+				// reply lost (or after its leader gave up); we can't tell.
+				return rpc.ErrMaybe
+			}
+			return reply.Err
+		}
+		first = false
+		ck.tryNextServer()
+	}
+}
+
+// tryNextServer moves on to the next server, pausing briefly to give
+// the cluster time to elect a leader.
+func (ck *Clerk) tryNextServer() {
+	ck.leader = (ck.leader + 1) % len(ck.servers)
+	time.Sleep(10 * time.Millisecond)
 }
